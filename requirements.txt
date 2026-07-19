@@ -1,0 +1,9 @@
+vkbottle>=4.5.2
+vkbottle-types>=5.199.0
+google-generativeai
+python-dotenv
+langdetect
+httpx
+aiofiles
+loguru
+

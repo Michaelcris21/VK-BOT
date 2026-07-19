@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables (CRITICAL)
+.env
+.env.local
+.env.*
+
+# Logs
+logs/
+*.log
+bot_stats.json
+translation_history.txt
+user_language_profiles.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+downloads/
+cache/
+vk-bot.tar.gz
+
+# OS specific
+.DS_Store
+Thumbs.db
