@@ -55,3 +55,5 @@ vk-bot.tar.gz
 # OS specific
 .DS_Store
 Thumbs.db
+
+.vkbottle/

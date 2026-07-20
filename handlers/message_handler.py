@@ -2,7 +2,7 @@
 Handler Principal de Mensajes para VK usando vkbottle BotLabeler
 Maneja mensajes de texto, traducción automática, modo asistente y notas de voz
 """
-from vkbottle import GroupEventType, Keyboard, KeyboardButtonColor, Text
+from vkbottle import GroupEventType, Keyboard, KeyboardButtonColor, Text, API
 from vkbottle.bot import BotLabeler, Message
 
 from config import settings, get_service_logger
@@ -19,6 +19,111 @@ router = IntelligentRouter()
 # Clave: (peer_id, original_conversation_message_id) -> lista de translation_message_ids
 translation_mapping = {}
 
+
+@labeler.message(text=["/upd", "/edit", "/обн", "/ред", ".гзв", ".еяше"])
+async def handle_update_command(message: Message):
+    """Comando manual para actualizar la traducción de un mensaje editado."""
+    try:
+        if not message.reply_message:
+            await message.answer("⚠️ Debes responder a tu propio mensaje editado con el comando /upd (o /обн) para actualizarlo.", random_id=0)
+            return
+
+        original_cmid = message.reply_message.conversation_message_id
+        peer_id = message.peer_id
+        
+        # Verificar que tengamos traducciones para este mensaje
+        key = (peer_id, original_cmid)
+        if key not in translation_mapping:
+            await message.answer("⚠️ No encontré una traducción previa para ese mensaje en mi memoria reciente.", random_id=0)
+            return
+
+        # Extraer el texto actualizado solicitándolo a la API de VK (bypasseando caché)
+        res = await edit_api.messages.get_by_conversation_message_id(
+            peer_id=peer_id,
+            conversation_message_ids=[original_cmid]
+        )
+        
+        if not res.items:
+            await message.answer("⚠️ No pude leer el mensaje editado de VK.", random_id=0)
+            return
+            
+        text = res.items[0].text
+        user_id = res.items[0].from_id
+        
+        if not text:
+            return
+            
+        # Re-detectar idioma e invocar traducción
+        detected_lang = await ai_service.detect_language(text)
+        
+        # Obtener nombre del usuario usando el edit_api local
+        user_info = await edit_api.users.get(user_ids=[user_id])
+        display_name = user_info[0].first_name if user_info else f"User {user_id}"
+        
+        sender_profile = language_tracker.get_profile(peer_id, user_id)
+        sender_flag = sender_profile.get_flag() if sender_profile else {"es": "🌐", "ru": "🇷🇺", "uk": "🇺🇦", "bg": "🇧🇬"}.get(detected_lang, "🌐")
+
+        # Buscar destinatarios que necesiten traducción
+        participants = language_tracker.get_chat_participants(peer_id)
+        target_languages = set()
+        for participant in participants:
+            if participant.user_id == user_id:
+                continue
+            if language_tracker.should_translate_for_user(peer_id, participant.user_id, detected_lang):
+                target = participant.get_target_language()
+                if target and target != detected_lang:
+                    target_languages.add(target)
+                    
+        # Si no hay nadie más configurado que hable otro idioma, usar idioma por defecto
+        if not target_languages:
+            default_target = await translation_service.get_target_language(detected_lang)
+            if default_target and default_target != detected_lang:
+                target_languages.add(default_target)
+            else:
+                return
+
+        # Determinar lógica de género
+        sender_gender = sender_profile.gender if sender_profile else None
+        
+        # Determinar género del destinatario si solo hay uno (además del emisor)
+        configured_participants = [p for p in participants if p.is_fully_configured() and p.user_id != user_id]
+        recipient_gender = None
+        if len(configured_participants) == 1:
+            recipient_gender = configured_participants[0].gender
+
+        # Editar cada una de las traducciones enviadas anteriormente
+        translation_msg_ids = translation_mapping[key]
+        
+        for i, target_lang in enumerate(target_languages):
+            if i >= len(translation_msg_ids):
+                break
+                
+            translated = await translation_service.translate_to_target(
+                text, 
+                target_lang,
+                sender_gender=sender_gender,
+                recipient_gender=recipient_gender
+            )
+            if translated:
+                if translated.strip().lower() == text.strip().lower():
+                    continue
+                    
+                msg_to_edit_id = translation_msg_ids[i]
+                new_text = f"{sender_flag} {display_name}: {translated}"
+                
+                logger.info(f"📝 Actualizando traducción manual (ID: {msg_to_edit_id}) en chat {peer_id}")
+                await edit_api.messages.edit(
+                    peer_id=peer_id,
+                    message_id=msg_to_edit_id,
+                    message=new_text,
+                    keep_forward_messages=True
+                )
+                
+        # Confirmar éxito borrando el comando /upd y mandando un tick temporal si se puede, o solo callar
+        # No mandaremos confirmación extra para no spamear el chat.
+        
+    except Exception as e:
+        logger.error(f"❌ Error al procesar comando manual /upd: {e}")
 
 @labeler.message()
 async def handle_message(message: Message):
@@ -212,9 +317,13 @@ async def _handle_translator_mode(message: Message):
                 if target and target != detected_lang:
                     target_languages.add(target)
 
-        # Si no hay nadie más configurado que hable otro idioma, no traducir
+        # Si no hay nadie más configurado que hable otro idioma, usar idioma por defecto
         if not target_languages:
-            return
+            default_target = await translation_service.get_target_language(detected_lang)
+            if default_target and default_target != detected_lang:
+                target_languages.add(default_target)
+            else:
+                return
 
         # 7. Traducir y responder para cada idioma de destino
         for target_lang in target_languages:
@@ -364,7 +473,11 @@ async def _handle_voice(message: Message, attachment):
                         target_languages.add(target)
             
             if not target_languages:
-                return
+                default_target = await translation_service.get_target_language(detected_lang)
+                if default_target and default_target != detected_lang:
+                    target_languages.add(default_target)
+                else:
+                    return
             
             # Enviar las traducciones
             for target_lang in target_languages:
@@ -406,19 +519,27 @@ async def _handle_voice(message: Message, attachment):
         await message.answer(settings.Voice.ERROR_MESSAGE, random_id=0)
 
 
-@labeler.raw_event(GroupEventType.MESSAGE_EDIT, dataclass=Message)
-async def handle_message_edit(message: Message):
+# Instancia de API local para usar en el handler de edición (bypasseando ctx_api)
+edit_api = API(token=settings.VK_GROUP_TOKEN)
+edit_api.api_version = "5.199"
+
+@labeler.raw_event(GroupEventType.MESSAGE_EDIT)
+async def handle_message_edit(event: dict):
     """Maneja mensajes editados: re-traduce y actualiza el mensaje anterior del bot"""
-    logger.info(f"📝 Evento raw MESSAGE_EDIT recibido: Chat {message.peer_id}, Mensaje {message.conversation_message_id}")
     try:
-        text = message.text
-        if not text:
+        # Extraer el objeto del mensaje del payload del evento raw
+        msg_obj = event.get("object", {})
+        
+        peer_id = msg_obj.get("peer_id")
+        user_id = msg_obj.get("from_id")
+        original_cmid = msg_obj.get("conversation_message_id")
+        text = msg_obj.get("text")
+        
+        logger.info(f"📝 Evento raw MESSAGE_EDIT recibido: Chat {peer_id}, Mensaje {original_cmid}")
+        
+        if not text or not peer_id or not user_id or not original_cmid:
             return
             
-        peer_id = message.peer_id
-        user_id = message.from_id
-        original_cmid = message.conversation_message_id
-        
         # Buscar si tenemos traducciones previas para este mensaje
         key = (peer_id, original_cmid)
         if key not in translation_mapping:
@@ -427,8 +548,8 @@ async def handle_message_edit(message: Message):
         # Re-detectar idioma e invocar traducción
         detected_lang = await ai_service.detect_language(text)
         
-        # Obtener nombre del usuario
-        user_info = await message.ctx_api.users.get(user_ids=[user_id])
+        # Obtener nombre del usuario usando el edit_api local
+        user_info = await edit_api.users.get(user_ids=[user_id])
         display_name = user_info[0].first_name if user_info else f"User {user_id}"
         
         sender_profile = language_tracker.get_profile(peer_id, user_id)
@@ -450,6 +571,15 @@ async def handle_message_edit(message: Message):
             if detected_lang != default_target:
                 target_languages.add(default_target)
                 
+        # 5. Determinar lógica de género
+        sender_gender = sender_profile.gender if sender_profile else None
+        
+        # Determinar género del destinatario si solo hay uno (además del emisor)
+        configured_participants = [p for p in participants if p.is_fully_configured() and p.user_id != user_id]
+        recipient_gender = None
+        if len(configured_participants) == 1:
+            recipient_gender = configured_participants[0].gender
+
         # Editar cada una de las traducciones enviadas anteriormente
         translation_msg_ids = translation_mapping[key]
         
@@ -457,7 +587,12 @@ async def handle_message_edit(message: Message):
             if i >= len(translation_msg_ids):
                 break
                 
-            translated = await translation_service.translate_to_target(text, target_lang)
+            translated = await translation_service.translate_to_target(
+                text, 
+                target_lang,
+                sender_gender=sender_gender,
+                recipient_gender=recipient_gender
+            )
             if translated:
                 if translated.strip().lower() == text.strip().lower():
                     continue
@@ -466,7 +601,7 @@ async def handle_message_edit(message: Message):
                 new_text = f"{sender_flag} {display_name}: {translated}"
                 
                 logger.info(f"📝 Actualizando traducción editada (ID: {msg_to_edit_id}) en chat {peer_id}")
-                await message.ctx_api.messages.edit(
+                await edit_api.messages.edit(
                     peer_id=peer_id,
                     message_id=msg_to_edit_id,
                     message=new_text,
