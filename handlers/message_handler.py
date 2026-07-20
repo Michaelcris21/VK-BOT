@@ -4,6 +4,7 @@ Maneja mensajes de texto, traducción automática, modo asistente y notas de voz
 """
 from vkbottle import GroupEventType, Keyboard, KeyboardButtonColor, Text, API
 from vkbottle.bot import BotLabeler, Message
+import httpx
 
 from config import settings, get_service_logger
 from services import ai_service, translation_service
