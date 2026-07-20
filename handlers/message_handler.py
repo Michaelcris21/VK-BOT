@@ -2,12 +2,12 @@
 Handler Principal de Mensajes para VK usando vkbottle BotLabeler
 Maneja mensajes de texto, traducción automática, modo asistente y notas de voz
 """
-from vkbottle import GroupEventType
+from vkbottle import GroupEventType, Keyboard, KeyboardButtonColor, Text
 from vkbottle.bot import BotLabeler, Message
 
 from config import settings, get_service_logger
 from services import ai_service, translation_service
-from services.user_language_service import language_tracker, get_native_language_from_profile
+from services.user_language_service import language_tracker
 from utils import user_stats, text_formatter
 from core import IntelligentRouter, ActionStatus
 
@@ -48,7 +48,30 @@ async def handle_message(message: Message):
                         'sl': 'Esloveno 🇸🇮'
                     }
                     lang_name = lang_names.get(lang, lang.upper())
-                    await message.answer(f"✅ ¡Idioma configurado! Ahora tu idioma principal es {lang_name}.", random_id=0)
+                    
+                    # Ahora preguntar por el género
+                    keyboard_gender = Keyboard(one_time=False, inline=True)
+                    keyboard_gender.add(Text("♂️ Hombre", {"set_gender": "male"}), color=KeyboardButtonColor.PRIMARY)
+                    keyboard_gender.add(Text("♀️ Mujer", {"set_gender": "female"}), color=KeyboardButtonColor.SECONDARY)
+                    
+                    await message.answer(
+                        f"✅ ¡Idioma configurado ({lang_name})!\n\n"
+                        f"Para traducir correctamente, necesito saber tu género (para conjugaciones gramaticales):",
+                        keyboard=keyboard_gender.get_json(), random_id=0
+                    )
+                    return
+                elif "set_gender" in payload_data:
+                    gender = payload_data["set_gender"]
+                    user_info = await message.ctx_api.users.get(user_ids=[message.from_id])
+                    display_name = user_info[0].first_name if user_info else f"User {message.from_id}"
+                    
+                    profile = language_tracker.set_user_gender(message.peer_id, message.from_id, display_name, gender)
+                    
+                    gender_str = "Hombre ♂️" if gender == "male" else "Mujer ♀️"
+                    if profile.is_fully_configured():
+                        await message.answer(f"✅ ¡Género configurado ({gender_str})!\n\nTu perfil está completo. Ahora el bot traducirá tus mensajes automáticamente.", random_id=0)
+                    else:
+                        await message.answer(f"✅ ¡Género configurado ({gender_str})! Recuerda configurar tu idioma también.", random_id=0)
                     return
             except Exception as e:
                 logger.error(f"❌ Error al procesar payload de idioma: {e}")
@@ -141,73 +164,92 @@ async def _handle_translator_mode(message: Message):
     peer_id = message.peer_id
 
     try:
-        # 1. Obtener nombre y datos del usuario (país, idiomas) para perfilarlo de inmediato
-        user_info = await message.ctx_api.users.get(user_ids=[user_id], fields=["country", "personal"])
+        user_info = await message.ctx_api.users.get(user_ids=[user_id])
         display_name = user_info[0].first_name if user_info else f"User {user_id}"
-        
-        profile_native_lang = None
-        if user_info:
-            profile_native_lang = get_native_language_from_profile(user_info[0].__dict__)
 
-        # 2. Detectar idioma del mensaje
-        detected_lang = await ai_service.detect_language(text)
-        logger.info(f"🌐 Idioma detectado para '{display_name}': {detected_lang}")
+        # 1. Obtener y verificar perfil
+        sender_profile = language_tracker.get_profile(peer_id, user_id)
+        if not sender_profile or not sender_profile.is_fully_configured():
+            # Si no está configurado, preguntar
+            if not sender_profile or not sender_profile.primary_language:
+                keyboard = Keyboard(one_time=False, inline=True)
+                keyboard.add(Text("Español 🌐", {"set_lang": "es"}), color=KeyboardButtonColor.PRIMARY)
+                keyboard.add(Text("Ruso 🇷🇺", {"set_lang": "ru"}), color=KeyboardButtonColor.PRIMARY)
+                keyboard.row()
+                keyboard.add(Text("Ucraniano 🇺🇦", {"set_lang": "uk"}), color=KeyboardButtonColor.SECONDARY)
+                keyboard.add(Text("Búlgaro 🇧🇬", {"set_lang": "bg"}), color=KeyboardButtonColor.SECONDARY)
+                await message.answer(f"👋 ¡Hola {display_name}!\n\nPara poder traducir tus mensajes, primero debes configurar tu idioma principal:", keyboard=keyboard.get_json(), random_id=0)
+            elif not sender_profile.gender:
+                keyboard_gender = Keyboard(one_time=False, inline=True)
+                keyboard_gender.add(Text("♂️ Hombre", {"set_gender": "male"}), color=KeyboardButtonColor.PRIMARY)
+                keyboard_gender.add(Text("♀️ Mujer", {"set_gender": "female"}), color=KeyboardButtonColor.SECONDARY)
+                await message.answer(f"👋 ¡Hola {display_name}!\n\nPara traducir correctamente, necesito saber tu género:", keyboard=keyboard_gender.get_json(), random_id=0)
+            return
 
-        # 3. Registrar en el tracker (el bot aprende)
-        language_tracker.register_message(peer_id, user_id, display_name, detected_lang, profile_native_lang)
+        # 2. Obtener idioma del mensaje
+        detected_lang = sender_profile.primary_language
+        logger.info(f"🌐 Idioma del usuario '{display_name}': {detected_lang}")
 
-        # 4. Obtener todos los participantes del chat
+        # 3. Registrar en el tracker
+        language_tracker.register_message(peer_id, user_id, display_name)
+
+        # 4. Obtener todos los participantes configurados del chat
         participants = language_tracker.get_chat_participants(peer_id)
+        configured_participants = [p for p in participants if p.is_fully_configured() and p.user_id != user_id]
 
-        # 5. Determinar idiomas de destino necesarios
+        # 5. Determinar lógica de género
+        sender_gender = sender_profile.gender
+        recipient_gender = None
+        
+        if len(configured_participants) == 1:
+            recipient_gender = configured_participants[0].gender
+
+        # 6. Determinar idiomas de destino necesarios
         target_languages = set()
-        for participant in participants:
-            if participant.user_id == user_id:
-                continue  # No traducir para el propio autor
-            
+        for participant in configured_participants:
             if language_tracker.should_translate_for_user(peer_id, participant.user_id, detected_lang):
                 target = participant.get_target_language()
                 if target and target != detected_lang:
                     target_languages.add(target)
 
-        # 6. Si no hay suficientes perfiles, usar lógica por defecto (fallback)
+        # Si no hay nadie más configurado que hable otro idioma, no traducir
         if not target_languages:
-            default_target = await translation_service.get_target_language(detected_lang)
-            if detected_lang != default_target:
-                logger.info(f"🔄 Usando traducción por defecto: {detected_lang} -> {default_target}")
-                target_languages.add(default_target)
+            return
 
         # 7. Traducir y responder para cada idioma de destino
         for target_lang in target_languages:
-            translated = await translation_service.translate_to_target(text, target_lang)
-            if translated:
-                if translated.strip().lower() == text.strip().lower():
-                    continue
+            translated = await translation_service.translate_to_target(
+                text, target_lang, sender_gender=sender_gender, recipient_gender=recipient_gender
+            )
+            
+            # Validar que la traducción no esté vacía
+            if not translated or not translated.strip() or translated.strip().lower() == text.strip().lower():
+                logger.warning(f"⚠️ Traducción vacía o idéntica al original devuelta para {target_lang}")
+                continue
 
-                sender_profile = language_tracker.get_profile(peer_id, user_id)
-                sender_flag = sender_profile.get_flag() if sender_profile else {"es": "🌐", "ru": "🇷🇺", "uk": "🇺🇦", "bg": "🇧🇬"}.get(detected_lang, "🌐")
-                
-                logger.info(f"📤 Enviando traducción al {target_lang} para el chat grupal {peer_id}")
-                user_stats.record_action(user_id, 'translations')
-                sent_msg = await message.answer(f"{sender_flag} {display_name}: {translated}", random_id=0)
-                
-                # Guardar mapeo de forma segura
-                msg_id = None
-                if sent_msg:
-                    if hasattr(sent_msg, "message_id"):
-                        msg_id = sent_msg.message_id
-                    elif hasattr(sent_msg, "id"):
-                        msg_id = sent_msg.id
-                    elif isinstance(sent_msg, dict):
-                        msg_id = sent_msg.get("message_id") or sent_msg.get("id")
-                    elif isinstance(sent_msg, int):
-                        msg_id = sent_msg
-                
-                if msg_id:
-                    key = (peer_id, message.conversation_message_id)
-                    if key not in translation_mapping:
-                        translation_mapping[key] = []
-                    translation_mapping[key].append(msg_id)
+            sender_flag = sender_profile.get_flag()
+
+            logger.info(f"📤 Enviando traducción al {target_lang} para el chat grupal {peer_id}")
+            user_stats.record_action(user_id, 'translations')
+            sent_msg = await message.answer(f"{sender_flag} {display_name}: {translated}", random_id=0)
+            
+            # Guardar mapeo de forma segura
+            msg_id = None
+            if sent_msg:
+                if hasattr(sent_msg, "message_id"):
+                    msg_id = sent_msg.message_id
+                elif hasattr(sent_msg, "id"):
+                    msg_id = sent_msg.id
+                elif isinstance(sent_msg, dict):
+                    msg_id = sent_msg.get("message_id") or sent_msg.get("id")
+                elif isinstance(sent_msg, int):
+                    msg_id = sent_msg
+            
+            if msg_id:
+                key = (peer_id, message.conversation_message_id)
+                if key not in translation_mapping:
+                    translation_mapping[key] = []
+                translation_mapping[key].append(msg_id)
 
     except Exception as e:
         logger.error(f"❌ Error en modo traductor de grupo: {e}")
@@ -271,61 +313,90 @@ async def _handle_voice(message: Message, attachment):
             user_id = message.from_id
             peer_id = message.peer_id
             
-            # Obtener nombre y datos del usuario (país, idiomas) para notas de voz
-            user_info = await message.ctx_api.users.get(user_ids=[user_id], fields=["country", "personal"])
+            user_info = await message.ctx_api.users.get(user_ids=[user_id])
             display_name = user_info[0].first_name if user_info else f"User {user_id}"
             
-            profile_native_lang = None
-            if user_info:
-                profile_native_lang = get_native_language_from_profile(user_info[0].__dict__)
+            # Obtener y verificar perfil
+            sender_profile = language_tracker.get_profile(peer_id, user_id)
+            if not sender_profile or not sender_profile.is_fully_configured():
+                # Si no está configurado, la transcripción se muestra, pero no se traduce.
+                # También pedimos configurar.
+                await message.answer(f"🎙️ {display_name} (voz): {transcribed_text}", random_id=0)
+                
+                if not sender_profile or not sender_profile.primary_language:
+                    keyboard = Keyboard(one_time=False, inline=True)
+                    keyboard.add(Text("Español 🌐", {"set_lang": "es"}), color=KeyboardButtonColor.PRIMARY)
+                    keyboard.add(Text("Ruso 🇷🇺", {"set_lang": "ru"}), color=KeyboardButtonColor.PRIMARY)
+                    keyboard.row()
+                    keyboard.add(Text("Ucraniano 🇺🇦", {"set_lang": "uk"}), color=KeyboardButtonColor.SECONDARY)
+                    keyboard.add(Text("Búlgaro 🇧🇬", {"set_lang": "bg"}), color=KeyboardButtonColor.SECONDARY)
+                    await message.answer(f"👋 ¡Hola {display_name}!\n\nPara poder traducir tus mensajes, primero debes configurar tu idioma principal:", keyboard=keyboard.get_json(), random_id=0)
+                elif not sender_profile.gender:
+                    keyboard_gender = Keyboard(one_time=False, inline=True)
+                    keyboard_gender.add(Text("♂️ Hombre", {"set_gender": "male"}), color=KeyboardButtonColor.PRIMARY)
+                    keyboard_gender.add(Text("♀️ Mujer", {"set_gender": "female"}), color=KeyboardButtonColor.SECONDARY)
+                    await message.answer(f"👋 ¡Hola {display_name}!\n\nPara traducir correctamente, necesito saber tu género:", keyboard=keyboard_gender.get_json(), random_id=0)
+                return
+                
+            detected_lang = sender_profile.primary_language
             
             # Registrar transcripción en el tracker
-            language_tracker.register_message(peer_id, user_id, display_name, detected_lang, profile_native_lang)
+            language_tracker.register_message(peer_id, user_id, display_name)
             
             # Mostrar transcripción original en el grupo
             await message.answer(f"🎙️ {display_name} (voz): {transcribed_text}", random_id=0)
             
             # Buscar destinatarios que necesiten traducción
             participants = language_tracker.get_chat_participants(peer_id)
+            configured_participants = [p for p in participants if p.is_fully_configured() and p.user_id != user_id]
+            
+            sender_gender = sender_profile.gender
+            recipient_gender = None
+            
+            if len(configured_participants) == 1:
+                recipient_gender = configured_participants[0].gender
+            
             target_languages = set()
-            for participant in participants:
-                if participant.user_id == user_id:
-                    continue
+            for participant in configured_participants:
                 if language_tracker.should_translate_for_user(peer_id, participant.user_id, detected_lang):
                     target = participant.get_target_language()
                     if target and target != detected_lang:
                         target_languages.add(target)
             
             if not target_languages:
-                default_target = await translation_service.get_target_language(detected_lang)
-                if detected_lang != default_target:
-                    target_languages.add(default_target)
+                return
             
             # Enviar las traducciones
             for target_lang in target_languages:
-                translated = await translation_service.translate_to_target(transcribed_text, target_lang)
-                if translated:
-                    sender_profile = language_tracker.get_profile(peer_id, user_id)
-                    sender_flag = sender_profile.get_flag() if sender_profile else {"es": "🌐", "ru": "🇷🇺", "uk": "🇺🇦", "bg": "🇧🇬"}.get(detected_lang, "🌐")
-                    sent_msg = await message.answer(f"{sender_flag} {display_name} (voz): {translated}", random_id=0)
+                translated = await translation_service.translate_to_target(
+                    transcribed_text, target_lang, sender_gender=sender_gender, recipient_gender=recipient_gender
+                )
+                
+                # Validar que la traducción no esté vacía
+                if not translated or not translated.strip() or translated.strip().lower() == transcribed_text.strip().lower():
+                    logger.warning(f"⚠️ Traducción de voz vacía o idéntica devuelta para {target_lang}")
+                    continue
                     
-                    # Guardar mapeo de forma segura
-                    msg_id = None
-                    if sent_msg:
-                        if hasattr(sent_msg, "message_id"):
-                            msg_id = sent_msg.message_id
-                        elif hasattr(sent_msg, "id"):
-                            msg_id = sent_msg.id
-                        elif isinstance(sent_msg, dict):
-                            msg_id = sent_msg.get("message_id") or sent_msg.get("id")
-                        elif isinstance(sent_msg, int):
-                            msg_id = sent_msg
-                    
-                    if msg_id:
-                        key = (peer_id, message.conversation_message_id)
-                        if key not in translation_mapping:
-                            translation_mapping[key] = []
-                        translation_mapping[key].append(msg_id)
+                sender_flag = sender_profile.get_flag()
+                sent_msg = await message.answer(f"{sender_flag} {display_name} (voz): {translated}", random_id=0)
+                
+                # Guardar mapeo de forma segura
+                msg_id = None
+                if sent_msg:
+                    if hasattr(sent_msg, "message_id"):
+                        msg_id = sent_msg.message_id
+                    elif hasattr(sent_msg, "id"):
+                        msg_id = sent_msg.id
+                    elif isinstance(sent_msg, dict):
+                        msg_id = sent_msg.get("message_id") or sent_msg.get("id")
+                    elif isinstance(sent_msg, int):
+                        msg_id = sent_msg
+                
+                if msg_id:
+                    key = (peer_id, message.conversation_message_id)
+                    if key not in translation_mapping:
+                        translation_mapping[key] = []
+                    translation_mapping[key].append(msg_id)
 
         # Registrar estadísticas de traducción de voz
         user_stats.record_action(message.from_id, 'translations')

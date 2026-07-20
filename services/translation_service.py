@@ -95,11 +95,11 @@ class TranslationService:
             return f"❌ Error técnico al traducir: {str(e)[:100]}..."
 
     # Asegúrate de que tu `translate_to_target` también use la nueva lógica
-    async def translate_to_target(self, text: str, target_language: str) -> Optional[str]:
+    async def translate_to_target(self, text: str, target_language: str, sender_gender: Optional[str] = None, recipient_gender: Optional[str] = None) -> Optional[str]:
         """Traduce texto a un idioma de destino específico."""
         try:
             # Reutilizamos la lógica robusta del ai_service
-            return await ai_service.generate_translation(text, target_language)
+            return await ai_service.generate_translation(text, target_language, sender_gender, recipient_gender)
         except Exception as e:
             self.logger.error(f"❌ Error en traducción a objetivo '{target_language}'", error=e)
             return None
@@ -313,69 +313,7 @@ Texto a traducir:
             'was_cached': hash(text.lower().strip()) in self.translation_cache
         }
     
-# En la clase TranslationService, dentro de services/translation_service.py
 
-    async def translate_to_target(self, text: str, target_language: str) -> str:
-        """Traduce texto a un idioma de destino específico."""
-        try:
-            # Aquí va tu lógica para llamar a la API de traducción
-            # (ej: Google Translate, Gemini, etc.) especificando el 'target_language'
-            
-            # Ejemplo simplificado con Gemini:
-            prompt = f"Translate the following text to {target_language}. Respond ONLY with the translation.\n\nText: \"{text}\""
-            
-            # Suponiendo que tienes un cliente de IA genérico
-            response = await ai_service.generate_text(AIRequest(prompt=prompt, temperature=0.1))
-
-            if response.success:
-                return response.content
-            else:
-                return f"Error al traducir a {target_language}"
-
-        except Exception as e:
-            self.logger.error(f"❌ Error en traducción a objetivo '{target_language}'", error=e)
-            return f"No se pudo traducir a {target_language}."
-
-    async def translate_to_target(self, text: str, target_language: str) -> Optional[str]:
-        """
-        Traduce texto a un idioma de destino específico de forma robusta,
-        con reintentos y prompts alternativos.
-        """
-        self.logger.info(f"Traduciendo a '{target_language}': '{text[:30]}...'")
-        
-        # --- INICIO DE LA CORRECCIÓN A PRUEBA DE FALLOS ---
-
-        # Intento 1: Prompt directo y simple
-        prompt1 = f"Translate the following text to {target_language}. Respond ONLY with the full, complete translation, without any extra text or explanations.\n\nText: \"{text}\""
-        
-        request = AIRequest(prompt=prompt1, temperature=0.1)
-        response = await ai_service.generate_text(request)
-
-        # Si el primer intento funciona, genial.
-        if response.success and response.content:
-            return response.content
-        
-        self.logger.warning(f"Intento 1 de traducción falló (Reason: {response.error}). Reintentando con prompt alternativo...")
-
-        # Intento 2: Prompt más contextual y menos restrictivo
-        # A veces, darle más contexto ayuda a pasar los filtros de seguridad.
-        prompt2 = f"""
-        You are a translation expert. Your task is to translate a user's message.
-        The user's message is: "{text}"
-        Translate this message accurately into the language: {target_language}.
-        Your response must ONLY be the translated text itself.
-        """
-        
-        request = AIRequest(prompt=prompt2, temperature=0.2)
-        response = await ai_service.generate_text(request)
-
-        if response.success and response.content:
-            self.logger.info("✅ Traducción exitosa en el segundo intento.")
-            return response.content
-        
-        # Si ambos intentos fallan, nos rendimos.
-        self.logger.error(f"❌ Traducción fallida después de 2 intentos. Último error: {response.error}")
-        return None # Devolvemos None para indicar un fallo total.
 
     async def get_target_language(self, source_language: str) -> str:
         """

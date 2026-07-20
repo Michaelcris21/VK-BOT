@@ -17,36 +17,31 @@ class UserLanguageProfile:
     user_id: int
     peer_id: int                              # ID del chat (grupo/privado)
     display_name: str = ""                    # Nombre visible del usuario
-    primary_language: Optional[str] = None    # Idioma principal detectado (ej: "ru")
+    primary_language: Optional[str] = None    # Idioma principal configurado manualmente
+    gender: Optional[str] = None              # Género del usuario: "male" o "female"
     custom_flag: Optional[str] = None         # Bandera personalizada elegida por el usuario
-    language_counts: Dict[str, int] = field(default_factory=dict)  # Historial: {"ru": 45, "es": 2}
-    total_messages: int = 0                   # Total de mensajes analizados
-    confidence: float = 0.0                   # Confianza en el idioma principal (0.0 - 1.0)
+    language_counts: Dict[str, int] = field(default_factory=dict)  # Historial estadístico
+    total_messages: int = 0                   # Total de mensajes registrados
+    confidence: float = 0.0                   # Confianza (legacy, se mantiene por compatibilidad)
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
 
-    def register_message(self, detected_lang: str):
-        """Registra un mensaje y actualiza el perfil"""
+    def is_fully_configured(self) -> bool:
+        """Verifica si el usuario ha configurado idioma Y género"""
+        return self.primary_language is not None and self.gender is not None
+
+    def register_message(self):
+        """Registra un mensaje (solo estadísticas, NO modifica el idioma)"""
         self.total_messages += 1
-        self.language_counts[detected_lang] = self.language_counts.get(detected_lang, 0) + 1
         self.last_seen = datetime.now().isoformat()
         if not self.first_seen:
             self.first_seen = self.last_seen
-
-        # Recalcular idioma principal
-        if self.language_counts:
-            most_common = max(self.language_counts, key=self.language_counts.get)
-            count = self.language_counts[most_common]
-            self.primary_language = most_common
-            self.confidence = count / self.total_messages
 
     def get_target_language(self) -> Optional[str]:
         """
         Determina a qué idioma traducir para ESTE usuario.
         El usuario necesita recibir las traducciones en su propio idioma principal.
         """
-        if not self.primary_language or self.confidence < 0.5:
-            return None
         return self.primary_language
 
     def get_flag(self) -> str:
@@ -68,68 +63,6 @@ class UserLanguageProfile:
         return defaults.get(self.primary_language, "🌐")
 
 
-def get_native_language_from_profile(user_info: dict) -> Optional[str]:
-    """
-    Intenta extraer el idioma nativo del usuario a partir de su perfil de VK
-    utilizando los campos de país y configuración personal de idiomas.
-    """
-    # 1. Analizar 'personal' -> 'langs'
-    personal = user_info.get("personal", {}) or {}
-    langs = personal.get("langs", [])
-    if langs:
-        for lang in langs:
-            lang_lower = str(lang).lower()
-            if "бълг" in lang_lower or "bulg" in lang_lower:
-                return "bg"
-            if "укр" in lang_lower or "ukra" in lang_lower:
-                return "uk"
-            if "рус" in lang_lower or "russ" in lang_lower:
-                return "ru"
-            if "исп" in lang_lower or "span" in lang_lower or "espan" in lang_lower:
-                return "es"
-            if "пол" in lang_lower or "pola" in lang_lower or "poly" in lang_lower:
-                return "pl"
-            if "чеш" in lang_lower or "czec" in lang_lower:
-                return "cs"
-            if "слов" in lang_lower or "slov" in lang_lower:
-                if "слова" in lang_lower or "slova" in lang_lower:
-                    return "sk"
-                if "слове" in lang_lower or "slove" in lang_lower:
-                    return "sl"
-            if "серб" in lang_lower or "serb" in lang_lower:
-                return "sr"
-            if "хорв" in lang_lower or "croa" in lang_lower:
-                return "hr"
-
-    # 2. Analizar 'country'
-    country = user_info.get("country", {}) or {}
-    country_title = str(country.get("title", "")).lower()
-    if country_title:
-        if "болг" in country_title or "bulg" in country_title:
-            return "bg"
-        if "укр" in country_title or "ukra" in country_title:
-            return "uk"
-        if "росс" in country_title or "russi" in country_title or "белар" in country_title or "belar" in country_title or "казах" in country_title or "kazak" in country_title:
-            return "ru"
-        if "испа" in country_title or "spain" in country_title or "mexi" in country_title or "mexc" in country_title or "arge" in country_title or "colo" in country_title or "peru" in country_title or "venez" in country_title or "chile" in country_title:
-            return "es"
-        if "поль" in country_title or "polan" in country_title:
-            return "pl"
-        if "чех" in country_title or "czec" in country_title:
-            return "cs"
-        if "слов" in country_title or "slov" in country_title:
-            if "слова" in country_title:
-                return "sk"
-            if "слове" in country_title:
-                return "sl"
-        if "серб" in country_title or "serbi" in country_title:
-            return "sr"
-        if "хорв" in country_title or "croat" in country_title:
-            return "hr"
-            
-    return None
-
-
 class UserLanguageTracker:
     """Gestiona los perfiles lingüísticos de todos los participantes"""
 
@@ -149,9 +82,8 @@ class UserLanguageTracker:
         return self.profiles.get(self._profile_key(peer_id, user_id))
 
     def register_message(self, peer_id: int, user_id: int,
-                          display_name: str, detected_lang: str,
-                          profile_native_lang: Optional[str] = None) -> UserLanguageProfile:
-        """Registra un mensaje y actualiza/crea el perfil del usuario"""
+                          display_name: str) -> UserLanguageProfile:
+        """Registra un mensaje y actualiza/crea el perfil del usuario (solo estadísticas)"""
         key = self._profile_key(peer_id, user_id)
 
         if key not in self.profiles:
@@ -166,17 +98,8 @@ class UserLanguageTracker:
             )
 
         profile = self.profiles[key]
-        profile.display_name = display_name  # Actualizar nombre si cambió
-        
-        # Pre-configurar el idioma nativo si viene del perfil de VK
-        if profile_native_lang and (not profile.primary_language or profile.total_messages < 3):
-            if profile.primary_language != profile_native_lang:
-                profile.primary_language = profile_native_lang
-                profile.confidence = 1.0
-                profile.language_counts[profile_native_lang] = profile.language_counts.get(profile_native_lang, 0) + 1
-                self.logger.info(f"🧠 Inicializado idioma nativo de {display_name} como '{profile_native_lang}' desde perfil de VK")
-
-        profile.register_message(detected_lang)
+        profile.display_name = display_name
+        profile.register_message()
 
         # Auto-guardar cada 10 mensajes
         if profile.total_messages % 10 == 0:
@@ -223,6 +146,23 @@ class UserLanguageTracker:
         self._save_profiles()
         return profile
 
+    def set_user_gender(self, peer_id: int, user_id: int,
+                        display_name: str, gender: str) -> UserLanguageProfile:
+        """Establece el género del usuario y lo persiste"""
+        key = self._profile_key(peer_id, user_id)
+        if key not in self.profiles:
+            self.profiles[key] = UserLanguageProfile(
+                user_id=user_id,
+                peer_id=peer_id,
+                display_name=display_name
+            )
+        profile = self.profiles[key]
+        profile.display_name = display_name
+        profile.gender = gender
+        self.logger.info(f"🧠 Género establecido para {display_name}: {gender}")
+        self._save_profiles()
+        return profile
+
     def get_translation_target_for_user(self, peer_id: int, user_id: int) -> Optional[str]:
         """
         Devuelve el idioma al que se debe traducir un mensaje
@@ -241,13 +181,12 @@ class UserLanguageTracker:
         """
         Determina si un mensaje en cierto idioma necesita traducción
         para un usuario específico.
-
-        Ejemplo: Si el usuario habla 'ru' y el mensaje está en 'ru',
-                 NO necesita traducción para él.
+        Solo traduce si el usuario está completamente configurado y
+        el mensaje está en un idioma diferente al suyo.
         """
         profile = self.get_profile(peer_id, user_id)
-        if not profile or profile.confidence < 0.5:
-            return True  # Sin datos, traducir por defecto
+        if not profile or not profile.is_fully_configured():
+            return False  # Sin configurar, NO traducir
 
         return message_lang != profile.primary_language
 

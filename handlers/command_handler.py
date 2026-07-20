@@ -134,10 +134,10 @@ async def handle_my_language(message: Message):
 
     profile = language_tracker.get_profile(message.peer_id, message.from_id)
 
-    if not profile or profile.total_messages < 3:
+    if not profile or not profile.is_fully_configured():
         await message.answer(
-            "🤷 Aún no tengo suficientes datos sobre tu idioma.\n"
-            "Envía al menos 3 mensajes para que pueda identificarte.",
+            "🤷 Aún no has configurado tu perfil completamente.\n"
+            "Usa el comando /idiomas para elegir tu idioma y género.",
             random_id=0
         )
         return
@@ -150,32 +150,16 @@ async def handle_my_language(message: Message):
     }
 
     primary = lang_names.get(profile.primary_language, profile.primary_language)
-    confidence_pct = round(profile.confidence * 100)
+    gender_str = "Masculino ♂️" if profile.gender == "male" else "Femenino ♀️"
 
     text = (
         f"🧠 TU PERFIL LINGÜÍSTICO\n\n"
         f"👤 {profile.display_name}\n"
         f"🗣️ Idioma principal: {primary}\n"
-        f"📊 Confianza: {confidence_pct}%\n"
-        f"💬 Mensajes analizados: {profile.total_messages}\n\n"
-    )
-
-    # Mostrar distribución
-    if len(profile.language_counts) > 1:
-        text += "📈 Distribución:\n"
-        sorted_langs = sorted(
-            profile.language_counts.items(),
-            key=lambda x: x[1], reverse=True
-        )
-        for lang_code, count in sorted_langs:
-            name = lang_names.get(lang_code, lang_code)
-            pct = round((count / profile.total_messages) * 100)
-            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-            text += f"  {name}: {bar} {pct}%\n"
-
-    text += (
-        f"\n💡 Las traducciones se personalizan para ti.\n"
-        f"Los mensajes se traducirán a tu idioma automáticamente."
+        f"⚧️ Género: {gender_str}\n"
+        f"💬 Mensajes enviados: {profile.total_messages}\n\n"
+        f"💡 Las traducciones se personalizan para ti.\n"
+        f"Los mensajes se traducirán a tu idioma automáticamente, con el contexto de género correcto."
     )
 
     await message.answer(text, random_id=0)

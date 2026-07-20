@@ -507,17 +507,23 @@ class AIService:
 
 # En la clase AIService, dentro de services/ai_service.py
 
-    async def generate_translation(self, text: str, target_language: str) -> Optional[str]:
+    async def generate_translation(self, text: str, target_language: str, sender_gender: Optional[str] = None, recipient_gender: Optional[str] = None) -> Optional[str]:
         """
         Genera una traducción de forma robusta usando la interfaz de chat,
         que es menos propensa a ser bloqueada por los filtros de seguridad.
         Incluye rotación automática de modelos si se agota la cuota.
+        Incluye contexto gramatical basado en género.
         """
         async def _do_translation():
             start_time = datetime.now()
             
             # Usamos un 'system_instruction' que le da a la IA un rol claro y profesional.
-            system_prompt = f"You are a professional, highly accurate translation engine. Your sole purpose is to translate the user's text into {target_language}. You must respond ONLY with the translated text itself, without any introductory phrases, explanations, or apologies."
+            system_prompt = f"You are a professional, highly accurate translation engine. Your sole purpose is to translate the user's text into {target_language}. You must respond ONLY with the translated text itself, without any introductory phrases, explanations, or apologies.\n"
+            
+            if sender_gender and recipient_gender:
+                system_prompt += f"The sender is {sender_gender}. The recipient is {recipient_gender}. Use the appropriate grammatical gender for first-person (sender) and second-person (recipient) references in the translation."
+            elif sender_gender:
+                system_prompt += f"The sender is {sender_gender}. Use the appropriate grammatical gender for first-person references. For second-person or third-person references, use neutral/default forms."
 
             model_name = self._get_model(AIModelType.TEXT)
             model = genai.GenerativeModel(model_name, system_instruction=system_prompt)
@@ -541,6 +547,11 @@ class AIService:
                 return None
 
             translated_text = "".join(part.text for part in response.parts if part.text)
+            
+            if not translated_text or not translated_text.strip():
+                self.logger.warning("Traducción vacía devuelta por el modelo.")
+                return None
+
             processing_time = (datetime.now() - start_time).total_seconds()
             self.logger.info(f"✅ Traducción generada con '{model_name}' en {processing_time:.2f}s")
             
